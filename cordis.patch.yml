@@ -1,0 +1,9 @@
+# dsh-peak-shift bundle patch: inserts the peak-shift row over the base tree.
+# Defaults live in the plugin's Config schema; override per profile in
+# $DSH_HOME/profiles/<name>/cordis.patch.yml with:
+#   - id: peak-shift
+#     config: { ... }
+- insert:
+    - id: peak-shift
+      name: 'dsh-peak-shift'
+      config: {}
