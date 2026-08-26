@@ -20,20 +20,35 @@
 2. 自动加入该 profile 的 `dsh.profile.bundles`;
 3. 其 `cordis.patch.yml` 插入 `peak-shift` 插件行。
 
+### 从 GitHub 安装(推荐)
+
 ```bash
-# 从插件所在目录执行(也可传绝对路径)
-dsh plugin --profile web add ./dsh-peak-shift
-# 重启 dsh web 后生效。可确认配置树:
-dsh --profile web --dump-config | grep -A5 peak-shift
+dsh plugin --profile web add github:Pige-cutest/dsh-peak-shift-plugin#v0.1.0
 ```
 
 web profile 是默认用法。想让 **headless** 批量任务也错峰,单独建一个 profile:
 
 ```bash
-dsh plugin --profile headless add ./dsh-peak-shift
+dsh plugin --profile headless add github:Pige-cutest/dsh-peak-shift-plugin#v0.1.0
 ```
 
-> 依赖解析:插件的 peer 依赖(`@deepseek-ai/*`)不随插件安装,由 dsh 启动时维护的 `$DSH_HOME/profiles/node_modules` 扁平回退目录解析,无需额外步骤。
+安装后重启对应 profile(web / headless),可确认配置树:
+
+```bash
+dsh --profile web --dump-config | grep -A5 peak-shift
+```
+
+### 本地开发安装
+
+从插件仓库克隆/源码目录执行:
+
+```bash
+dsh plugin --profile web add ./dsh-peak-shift
+```
+
+> **依赖解析**:插件的 peer 依赖(`@deepseek-ai/*`)不随插件安装,由 dsh 启动时维护的 `$DSH_HOME/profiles/node_modules` 扁平回退目录解析,无需额外步骤。
+>
+> **build 脚本**:本包没有 `prepare`/build 步骤,`lib/` 直接随仓库发布,pnpm 安装时无需放行 build scripts。
 
 ## 配置
 
