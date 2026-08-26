@@ -4,6 +4,58 @@ import { tmpdir } from 'node:os';
 import { suite, assert } from './helpers.mjs';
 import { createWindowPolicy } from '../lib/windows.js';
 import { PeakShiftRuntime } from '../lib/runtime.js';
+import { apply } from '../lib/index.js';
+
+/** Minimal mock context: captures listeners, intervals, effects. */
+function makeMockCtx() {
+  const listeners = new Map();
+  const intervals = [];
+  const ctx = {
+    logger: { warn() {}, info() {}, error() {} },
+    get() { return undefined; },
+    on(event, listener) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event).push(listener);
+      return () => {};
+    },
+    interval(callback) {
+      intervals.push(callback);
+      return () => {};
+    },
+    effect() {
+      return () => {};
+    },
+  };
+  return { ctx, listeners, intervals };
+}
+
+/** Emit a captured event with a payload. */
+function emit(listeners, event, payload) {
+  for (const listener of listeners.get(event) ?? []) listener(payload);
+}
+
+/** Minimal agent whose scope has NO `tools` (graceful-skip path) and a working effect(). */
+function makeMockAgent(id) {
+  const agentListeners = new Map();
+  return {
+    id,
+    ctx: {
+      on(event, listener) {
+        if (!agentListeners.has(event)) agentListeners.set(event, []);
+        agentListeners.get(event).push(listener);
+        return () => {};
+      },
+      effect(callback) {
+        const disposer = callback();
+        return () => { if (disposer) disposer(); };
+      },
+      // no `tools`: peak_shift_* tools must be skipped, not throw
+    },
+    session: { header: {}, events: [] },
+    cancel() {},
+    steer() {},
+  };
+}
 
 const s = suite('smoke');
 
@@ -127,6 +179,25 @@ s.test('defer mode with an aborted signal exits immediately with reject', async 
     assert(decision.kind === 'reject', 'aborted defer gate rejects');
   } finally {
     Date.now = originalNow;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+s.test('poll() iterates runtimes, not cleanup disposers (regression)', async () => {
+  const { Config } = await import('../lib/index.js');
+  const validated = Config['~standard'].validate({}).value;
+  const stateDir = mkdtempSync(join(tmpdir(), 'peak-shift-test-'));
+  try {
+    const { ctx, listeners, intervals } = makeMockCtx();
+    apply(ctx, { ...validated, stateDir });
+    const agent = makeMockAgent('session-poll-test');
+    emit(listeners, 'agent/created', { agent });
+    assert(intervals.length === 1, 'one poll interval registered');
+    // Must not throw: values are { runtime, cleanup }, and isTarget() exists.
+    intervals[0]();
+    // Dispose path must also tolerate the entry shape.
+    emit(listeners, 'agent/disposed', { agent });
+  } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
