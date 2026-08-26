@@ -109,6 +109,7 @@ npm test
 
 ## 已知限制
 
+- **故障安全**:任何 peak-shift 内部错误只记告警,**绝不打断 agent 创建或 LLM 请求**。在工具服务不可用的组合(如 web 的 agent-preset 平面)会自动跳过 `peak_shift_*` 工具,pre-step 闸门照常工作。
 - **估算非账单**:节省额按配置价格表计算,DeepSeek 实际扣费以官方账单为准;价格表可按实际校准。
 - **sidecar 非 session 日志**:park 的 held 消息存在独立文件,不参与 session 的 replay/导出;若 sidecar 丢失,闸门会在下一个高峰自动重新拦下(自愈)。
 - **defer 挂起期间 agent 保持 `running`**:暂停的请求等待期间,该 agent 的 turn 不关闭(这是有意的)。
