@@ -6,12 +6,41 @@
 
 ## 功能
 
+- **总开关**:`$DSH_HOME/settings.yaml` 的 `peak-shift: { enabled: false }` **热重载**关闭整个插件(无需重启);也可用 web 设置卡片、`/peak-shift off` 聊天命令或 `peak_shift_disable` 模型工具。关闭时会自动恢复被暂停的任务,绝不滞留。
+- **Web 设置卡片**:插件自带浏览器端 bundle(`dsh.client`),在 dsh web 的 **设置 → 插件** 里出现「错峰省钱」卡片:切换错峰开关、编辑高峰时段(星期/上午/下午/提前刹车)、查看累计节省估算与下次窗口切换。详见 [Web UI](#web-ui)。
 - **高峰自动暂停**:进入高峰窗口时,目标 agent 的下一个 LLM 请求被拦下(不发出),有 active goal 的任务还会持久化 `goals.pause` 停掉 round-driver。
 - **空闲自动续跑**:到达空闲起点时恢复 goal(`goals.resume`)、把被拦的请求重新投回 inbox(`agent.steer`),继续执行。
 - **不打断在途请求**:默认 `enforcement: 'gate'`,只拦「尚未发出的请求」;已在途的流式请求让它自然排空。可选的 `enforcement: 'cancel'` 才会中止在途 turn(会浪费已流式输出的 tokens,默认关闭)。
 - **提前刹车**:`leadMinutes` 在高峰开始前提前启动闸门,保证高峰边界上没有在途请求。
 - **费用估算**:按配置的价格表与 `peakFactor/offPeakFactor`,把错峰后实际产生的 token 用量换算成「节省额」,通过工具/状态查看(估算,非账单)。
-- **手动控制**:`peak_shift_pause` / `peak_shift_resume` / `peak_shift_status` / `peak_shift_stats` 四个 agent 工具。
+- **手动控制**:`peak_shift_pause` / `peak_shift_resume` / `peak_shift_enable` / `peak_shift_disable` / `peak_shift_status` / `peak_shift_stats` agent 工具。
+
+## 开关
+
+三种方式都走同一个热重载主开关(`$DSH_HOME/settings.yaml` 的 `peak-shift.enabled`),即时生效、无需重启:
+
+| 方式 | 用法 |
+|---|---|
+| 设置文件 | 编辑 `$DSH_HOME/settings.yaml`:`peak-shift: { enabled: false }` |
+| Web 卡片 | 设置 → 插件 → 错峰省钱,勾选「启用错峰模式」 |
+| 聊天命令 | `/peak-shift on` / `/peak-shift off` / `/peak-shift status` |
+| 模型工具 | `peak_shift_enable` / `peak_shift_disable` / `peak_shift_status`(含 `enabled` 字段) |
+
+## Web UI
+
+插件是双面的:Node 半(`lib/index.js`)跑闸门,浏览器半(`lib/client.js`)在 dsh web 前端注册设置卡片。web 前端会自动扫描已启用插件里声明了 `dsh.client` 的包,无需额外配置;卡片出现在 **设置 → 插件 → 可配置插件** 里,keyed 在 `peak-shift` settings 命名空间上。
+
+![错峰省钱设置卡片](docs/web-ui-card.png)
+
+卡片提供三块功能:
+
+- **统计节省费用**:累计节省估算(货币金额)、已错峰请求数、当前窗口(高峰/空闲)、下次切换时刻。数据是 Node 半随每次设置 `describe` 读取实时发布的快照(挂在命名空间 `base` 的 `stats` 块上),卡片挂载期间每 15 秒轮询刷新。
+- **开关错峰模式**:「启用错峰模式」复选框即时写入并生效,显示覆盖标记,可一键重置回部署默认。
+- **设置开关时间**:高峰时段编辑——星期(周一至周日复选,全不选 = 每天)、上午/下午两个 `HH:MM-HH:MM` 时段(留空删除该时段,支持跨午夜如 `22:00-06:00`)、提前刹车分钟数。保存经客户端 settings scope 的 revision 乐观锁写入;**宿主在每次提交时热重建活窗口策略**,非法输入(错误格式/未知星期)会被宿主忽略并保留原策略,绝不会卡死闸门。
+
+与模型工具/聊天命令一样,卡片写的就是 `$DSH_HOME/settings.yaml` 的 `peak-shift` 段——四种入口改的是同一份数据。
+
+关闭时会立即恢复所有自动暂停的任务(goal `resume` + 释放 parked 消息),不会滞留。
 
 ## 安装
 
@@ -57,6 +86,7 @@ dsh plugin --profile web add ./dsh-peak-shift
 ```yaml
 - id: peak-shift
   config:
+    enabled: true                # 总开关(默认 true);也可被 settings.yaml 热重载覆盖
     targets: [goal]              # 哪些 agent 参与:goal | headless | subagent | interactive
     windows:
       zone: Asia/Shanghai        # IANA 时区
@@ -110,6 +140,9 @@ npm test
 ## 已知限制
 
 - **故障安全**:任何 peak-shift 内部错误只记告警,**绝不打断 agent 创建或 LLM 请求**。在工具服务不可用的组合(如 web 的 agent-preset 平面)会自动跳过 `peak_shift_*` 工具,pre-step 闸门照常工作。
+- **Web 卡片的窗口编辑是扁平投影**:UI 只编辑第一组高峰条目(星期 + 上午/下午两个时段)和 `leadMinutes`;更复杂的窗口(多组高峰、多时段、其他时区)仍在 profile 的 `cordis.patch.yml` 里配置。settings.yaml 里的扁平字段会整体替换第一组高峰条目。
+- **远程浏览器无设置读写**:settings RPC 仅限 loopback;非本机浏览器上卡片不渲染(命名空间不可用),闸门不受影响。
+- **统计数据是进程内聚合**:「已错峰请求/节省额」聚合自本进程内各 agent 的运行时(含 sidecar 恢复的历史值,dispose 后仍计入),进程重启后从 sidecar 重新累计;卡片 15 秒轮询,非推送。
 - **估算非账单**:节省额按配置价格表计算,DeepSeek 实际扣费以官方账单为准;价格表可按实际校准。
 - **sidecar 非 session 日志**:park 的 held 消息存在独立文件,不参与 session 的 replay/导出;若 sidecar 丢失,闸门会在下一个高峰自动重新拦下(自愈)。
 - **defer 挂起期间 agent 保持 `running`**:暂停的请求等待期间,该 agent 的 turn 不关闭(这是有意的)。
