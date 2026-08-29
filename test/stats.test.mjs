@@ -1,4 +1,4 @@
-import { computeSavings, createStatsTracker, createTotals } from '../lib/stats.js';
+import { computeSavings, createStatsTracker, createTotals, DEEPSEEK_PRICING, effectivePerMillion } from '../lib/stats.js';
 import { suite, assert, assertNear } from './helpers.mjs';
 
 const s = suite('stats');
@@ -15,6 +15,40 @@ s.test('computeSavings applies the per-million table and the peak/off-peak delta
   // base = (1e6*0.27 + 5e5*1.1 + 1e5*0.07)/1e6 = 0.827
   // saved = 0.827 * (1 - 0.5)
   assertNear(computeSavings(usage, PRICING), 0.4135, 1e-9, 'saved amount');
+});
+
+s.test('official DeepSeek price table: flash preset bills CNY peak prices with half-price off-peak', () => {
+  // https://api-docs.deepseek.com/zh-cn/quick_start/pricing — v4-flash:
+  // 命中 0.10 / 未命中 3.0 / 输出 9.0 (CNY per million, peak);空闲五折。
+  const pricing = { ...DEEPSEEK_PRICING.flash, model: 'flash', peakFactor: 1, offPeakFactor: 0.5 };
+  assert(effectivePerMillion(pricing).input === 3.0, 'cache-miss input price');
+  assert(effectivePerMillion(pricing).cacheRead === 0.1, 'cache-hit input price');
+  assert(effectivePerMillion(pricing).output === 9.0, 'output price');
+  assert(effectivePerMillion(pricing).cacheWrite === 0, 'no separate cache-write category');
+  // 1M uncached input at peak costs 3.0 CNY; shifting it off-peak saves half.
+  assertNear(computeSavings({ inputTokens: 1000000 }, pricing), 1.5, 1e-9, 'saved CNY for 1M uncached input');
+  // 1M cache hit: 0.10 peak -> 0.05 saved.
+  assertNear(computeSavings({ cacheReadTokens: 1000000 }, pricing), 0.05, 1e-9, 'saved CNY for 1M cache hit');
+  // 1M output: 9.0 peak -> 4.5 saved.
+  assertNear(computeSavings({ outputTokens: 1000000 }, pricing), 4.5, 1e-9, 'saved CNY for 1M output');
+});
+
+s.test('official price table: pro preset', () => {
+  const pricing = { ...DEEPSEEK_PRICING.pro, model: 'pro', peakFactor: 1, offPeakFactor: 0.5 };
+  assert(effectivePerMillion(pricing).input === 9.0, 'pro cache-miss input');
+  assert(effectivePerMillion(pricing).cacheRead === 0.3, 'pro cache hit');
+  assert(effectivePerMillion(pricing).output === 27.0, 'pro output');
+  assertNear(computeSavings({ inputTokens: 1000000 }, pricing), 4.5, 1e-9, 'saved CNY for 1M uncached input');
+});
+
+s.test('custom model uses the configured table verbatim', () => {
+  const pricing = { ...PRICING, model: 'custom' };
+  assert(effectivePerMillion(pricing) === pricing.perMillion, 'custom table passed through');
+  assertNear(computeSavings({ inputTokens: 1000000 }, pricing), 0.135, 1e-9, 'custom-table savings');
+});
+
+s.test('unknown model falls back to the configured table', () => {
+  assert(effectivePerMillion(PRICING) === PRICING.perMillion, 'no model -> configured table');
 });
 
 s.test('computeSavings ignores missing/empty usage', () => {

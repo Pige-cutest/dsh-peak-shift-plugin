@@ -129,6 +129,8 @@ s.test('plugin modules load and Config validates the official default rule', asy
   assert(Array.isArray(peak.days) && peak.days.join(',') === 'mon,tue,wed,thu,fri', 'default weekdays Mon-Fri');
   assert(peak.ranges.join(',') === '09:00-12:00,14:00-18:00', 'default ranges');
   assert(value.mode === 'park', 'default mode park');
+  assert(value.pricing.model === 'flash', 'default price table is the official flash preset');
+  assert(value.pricing.currency === 'CNY', 'estimates are denominated in CNY');
   assert(value.pricing.offPeakFactor === 0.5, 'off-peak is half price');
   assert(value.pricing.peakFactor === 1, 'peak is full price');
 });

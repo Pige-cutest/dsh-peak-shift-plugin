@@ -115,6 +115,7 @@ const READY_SNAPSHOT = Object.freeze({
     days: Object.freeze(['mon', 'tue', 'wed', 'thu', 'fri']),
     morning: '09:00-12:00',
     afternoon: '14:00-18:00',
+    model: 'flash',
   }),
   user: Object.freeze({}),
   base: Object.freeze({
@@ -274,6 +275,13 @@ s.test('card renders collapsed, opens with stats, stages edits, and saves writes
   // Master switch writes immediately; the reset link unsets the override.
   elements(tree, 'input').find((input) => input.props.type === 'checkbox' && input.props.checked === true).props.onChange({ target: { checked: false } });
   assert(writes.some((write) => write[0] === 'set' && write[1] === 'enabled' && write[2] === false), 'switch writes enabled');
+
+  // Price-table selector writes the model field immediately.
+  assert(texts().includes('pricing.title'), 'pricing block visible');
+  const modelSelect = elements(tree, 'select').find((select) => select.props.value === 'flash');
+  assert(modelSelect !== undefined, 'price-table select present');
+  modelSelect.props.onChange({ target: { value: 'pro' } });
+  assert(writes.some((write) => write[0] === 'set' && write[1] === 'model' && write[2] === 'pro'), 'select writes the price table');
 
   // Agents panel: roster renders, per-agent resume writes the command channel.
   assert(texts().includes('session-panel-a'), 'paused agent listed');

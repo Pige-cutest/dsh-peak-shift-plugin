@@ -12,7 +12,7 @@
 - **空闲自动续跑**:到达空闲起点时恢复 goal(`goals.resume`)、把被拦的请求重新投回 inbox(`agent.steer`),继续执行。
 - **不打断在途请求**:默认 `enforcement: 'gate'`,只拦「尚未发出的请求」;已在途的流式请求让它自然排空。可选的 `enforcement: 'cancel'` 才会中止在途 turn(会浪费已流式输出的 tokens,默认关闭)。
 - **提前刹车**:`leadMinutes` 在高峰开始前提前启动闸门,保证高峰边界上没有在途请求。
-- **费用估算**:按配置的价格表与 `peakFactor/offPeakFactor`,把错峰后实际产生的 token 用量换算成「节省额」,通过工具/状态查看(估算,非账单)。
+- **费用估算**:按 **DeepSeek 官方价格表**(人民币/百万 tokens)把错峰后实际产生的 token 用量换算成「节省额」:内置 v4-flash(未命中 3.0 / 命中 0.10 / 输出 9.0 元)与 v4-pro(9.0 / 0.30 / 27.0 元)两档预设,卡片可切换,也可自定义价格表;空闲五折由 `offPeakFactor: 0.5` 表达(估算,非账单)。
 - **任务面板**:卡片里直接查看活跃 agent 列表——暂停/运行状态、手动暂停标记、暂存消息数、暂停原因、各任务累计节省;被暂停的任务可逐个或一键全部恢复。聚合统计从 sidecar 播种,**进程重启后依然连续**。
 - **手动控制**:`peak_shift_pause` / `peak_shift_resume` / `peak_shift_enable` / `peak_shift_disable` / `peak_shift_status` / `peak_shift_stats` agent 工具。
 
@@ -35,7 +35,7 @@
 
 卡片提供四块功能:
 
-- **统计节省费用**:累计节省估算(货币金额)、已错峰请求数、当前窗口(高峰/空闲)、下次切换时刻。数据是 Node 半随每次设置 `describe` 读取实时发布的快照(挂在命名空间 `base` 的 `stats` 块上),卡片挂载期间每 15 秒轮询刷新。聚合按 agent 播种自 sidecar 目录,进程重启后不归零。
+- **统计节省费用**:累计节省估算(人民币金额)、已错峰请求数、当前窗口(高峰/空闲)、下次切换时刻,以及**价格表选择器**(v4-flash / v4-pro / 自定义)。数据是 Node 半随每次设置 `describe` 读取实时发布的快照(挂在命名空间 `base` 的 `stats` 块上),卡片挂载期间每 15 秒轮询刷新。聚合按 agent 播种自 sidecar 目录,进程重启后不归零。
 - **开关错峰模式**:「启用错峰模式」复选框即时写入并生效,显示覆盖标记,可一键重置回部署默认。
 - **设置开关时间**:高峰时段编辑——星期(周一至周日复选,全不选 = 每天)、上午/下午两个 `HH:MM-HH:MM` 时段(留空删除该时段,支持跨午夜如 `22:00-06:00`)、提前刹车分钟数。保存经客户端 settings scope 的 revision 乐观锁写入;**宿主在每次提交时热重建活窗口策略**,非法输入(错误格式/未知星期)会被宿主忽略并保留原策略,绝不会卡死闸门。
 - **任务面板**:活跃 agent 列表(状态 chip、手动暂停标记、暂存消息数、暂停原因、单任务节省)。恢复走 `commands` 命令通道:卡片写 `resume:<agentId>` 或 `resume-all`,宿主 watcher 执行一次后自动清空该字段;设置文档只读时命令不执行也不会重放。
@@ -99,8 +99,9 @@ dsh plugin --profile web add ./dsh-peak-shift
     enforcement: gate            # gate(默认,只拦新请求) | cancel(中止在途 turn)
     mode: park                   # park(持久化停车) | defer(进程内挂起) | off(仅记录)
     pricing:                     # 节省额估算用的价格模型(非账单)
-      currency: USD
-      perMillion: { input: 0.27, cacheRead: 0.07, cacheWrite: 1.07, output: 1.1 }
+      model: flash               # 官方价格表:flash | pro | custom(用 perMillion)
+      currency: CNY              # 估算币种(官方表为人民币)
+      perMillion: { input: 3.0, cacheRead: 0.1, cacheWrite: 0, output: 9.0 }  # model: custom 时生效
       peakFactor: 1.0            # 高峰价 = 单价 × peakFactor
       offPeakFactor: 0.5         # 官方规则:空闲 = 高峰的一半
     startPolicy: park            # 高峰中新建的长任务:park(等空闲) | run(按高峰价照跑)
