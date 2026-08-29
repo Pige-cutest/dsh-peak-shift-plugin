@@ -38,6 +38,14 @@ function makeMockSettings() {
   const registrations = new Map();
   const settings = {
     writable: true,
+    updates: [],
+    async update(ns, patch) {
+      const reg = registrations.get(ns);
+      if (reg === undefined) throw new Error(`unknown namespace ${ns}`);
+      settings.updates.push({ ns, patch });
+      reg.resolved = reg.schema({ ...reg.resolved, ...patch });
+      for (const watcher of [...reg.watchers]) watcher(reg.resolved);
+    },
     register(ns, schema, options) {
       const reg = {
         ns,
@@ -53,10 +61,7 @@ function makeMockSettings() {
           reg.watchers.add(callback);
           return () => reg.watchers.delete(callback);
         },
-        async update(patch) {
-          reg.resolved = reg.schema({ ...reg.resolved, ...patch });
-          for (const watcher of [...reg.watchers]) watcher(reg.resolved);
-        },
+        update: (patch) => settings.update(ns, patch),
       };
     },
     /** Simulate an external settings.yaml change: re-resolve and notify. */
@@ -388,6 +393,84 @@ s.test('poll() publishes aggregated savings onto the settings base, surviving ag
     emit(listeners, 'agent/disposed', { agent: agentB });
     intervals[0]();
     assert(base.stats.shiftedRequests === 7, 'disposed agent keeps its contribution');
+  } finally {
+    Date.now = originalNow;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+s.test('aggregate stats are seeded from sidecar files before any agent exists', async () => {
+  const { Config } = await import('../lib/index.js');
+  const validated = Config['~standard'].validate({}).value;
+  const stateDir = mkdtempSync(join(tmpdir(), 'peak-shift-test-'));
+  const originalNow = Date.now;
+  const PEAK = Date.UTC(2026, 7, 24, 3, 0);
+  try {
+    writeFileSync(
+      join(stateDir, 'session-old.json'),
+      JSON.stringify({ version: 1, parkQueue: [], stats: { shiftedRequests: 4, savedEstimate: 0.5 } }),
+    );
+    writeFileSync(join(stateDir, 'not-peak-shift.json'), 'not json');
+
+    Date.now = () => PEAK;
+    const { ctx, intervals } = makeMockCtx();
+    const settings = makeMockSettings();
+    settings.mountInto(ctx);
+    apply(ctx, { ...validated, stateDir });
+
+    intervals[0]();
+    const { stats } = settings.baseOf('peak-shift');
+    assert(stats.shiftedRequests === 4, `seeded shiftedRequests (got ${stats.shiftedRequests})`);
+    assert(Math.abs(stats.savedEstimate - 0.5) < 1e-9, `seeded savedEstimate (got ${stats.savedEstimate})`);
+    assert(settings.baseOf('peak-shift').agents.length === 0, 'no agents yet');
+  } finally {
+    Date.now = originalNow;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+s.test('agents snapshot lands on the base and the card resume command releases a parked agent', async () => {
+  const { Config } = await import('../lib/index.js');
+  const validated = Config['~standard'].validate({}).value;
+  const stateDir = mkdtempSync(join(tmpdir(), 'peak-shift-test-'));
+  const originalNow = Date.now;
+  const PEAK = Date.UTC(2026, 7, 24, 3, 0); // 2026-08-24 11:00 CST (Mon peak)
+  try {
+    const { ctx, listeners, intervals } = makeMockCtx();
+    const settings = makeMockSettings();
+    settings.mountInto(ctx);
+    ctx.get = (name) => (name === 'settings' ? settings : undefined);
+    apply(ctx, { ...validated, stateDir, targets: ['interactive'] });
+
+    const steered = [];
+    const agent = makeMockAgent('session-panel-a');
+    agent.steer = (message) => steered.push(message);
+    emit(listeners, 'agent/created', { agent });
+    const gate = (agent._listeners.get('agent/pre-step') ?? [])[0];
+
+    Date.now = () => PEAK;
+    // Park one request through the gate.
+    await gate(
+      { messages: [{ id: 'm1', role: 'user', content: [], source: { kind: 'user' } }], turn: 1, step: 1, signal: new AbortController().signal },
+      async () => ({ kind: 'enter', messages: [] }),
+    );
+
+    intervals[0]();
+    let roster = settings.baseOf('peak-shift').agents;
+    assert(roster.length === 1 && roster[0].id === 'session-panel-a', 'agent listed on the base');
+    assert(roster[0].paused === true, 'agent reported paused');
+    assert(roster[0].park === 1, 'park queue size reported');
+
+    // The card writes a resume command; the host executes and consumes it.
+    settings.publishSection('peak-shift', { commands: 'resume:session-panel-a' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert(steered.length === 1 && steered[0].id === 'm1', 'parked message released by the command');
+    assert(settings.updates.some((update) => update.ns === 'peak-shift' && update.patch.commands === ''), 'command field cleared after execution');
+
+    intervals[0]();
+    roster = settings.baseOf('peak-shift').agents;
+    assert(roster[0].paused === false && roster[0].park === 0, 'roster reflects the resumed state');
   } finally {
     Date.now = originalNow;
     rmSync(stateDir, { recursive: true, force: true });

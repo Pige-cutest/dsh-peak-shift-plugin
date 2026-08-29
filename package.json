@@ -1,6 +1,6 @@
 {
   "name": "dsh-peak-shift",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Pause long-running dsh agents during DeepSeek peak-priced hours and resume them at off-peak, saving token costs.",
   "type": "module",
   "main": "lib/index.js",

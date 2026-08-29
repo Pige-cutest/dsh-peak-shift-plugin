@@ -127,6 +127,28 @@ const READY_SNAPSHOT = Object.freeze({
       nextOffPeakAt: '2026-08-24T05:00:00.000Z',
       updatedAt: 1,
     }),
+    agents: Object.freeze([
+      Object.freeze({
+        id: 'session-panel-a',
+        paused: true,
+        manual: false,
+        reason: '',
+        pausedAt: 1,
+        park: 2,
+        shiftedRequests: 3,
+        savedEstimate: 0.4,
+      }),
+      Object.freeze({
+        id: 'session-panel-b',
+        paused: false,
+        manual: false,
+        reason: '',
+        pausedAt: 0,
+        park: 0,
+        shiftedRequests: 6,
+        savedEstimate: 11.94,
+      }),
+    ]),
   }),
 });
 
@@ -252,6 +274,21 @@ s.test('card renders collapsed, opens with stats, stages edits, and saves writes
   // Master switch writes immediately; the reset link unsets the override.
   elements(tree, 'input').find((input) => input.props.type === 'checkbox' && input.props.checked === true).props.onChange({ target: { checked: false } });
   assert(writes.some((write) => write[0] === 'set' && write[1] === 'enabled' && write[2] === false), 'switch writes enabled');
+
+  // Agents panel: roster renders, per-agent resume writes the command channel.
+  assert(texts().includes('session-panel-a'), 'paused agent listed');
+  assert(texts().includes('session-panel-b'), 'active agent listed');
+  assert(texts().some((text) => text.startsWith('agents.park')), 'park queue size shown for the parked agent');
+  const resumeButton = elements(tree, 'button').find((button) => textsOf(button).includes('agents.resume'));
+  assert(resumeButton !== undefined, 'paused agent has a resume button');
+  resumeButton.props.onClick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert(writes.some((write) => write[0] === 'set' && write[1] === 'commands' && write[2] === 'resume:session-panel-a'), 'resume button writes the command channel');
+  const resumeAllButton = elements(tree, 'button').find((button) => textsOf(button).includes('agents.resumeAll'));
+  assert(resumeAllButton !== undefined, 'resume-all button present while agents are paused');
+  resumeAllButton.props.onClick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert(writes.some((write) => write[0] === 'set' && write[1] === 'commands' && write[2] === 'resume-all'), 'resume-all writes the command channel');
 
   setSnapshot({ ...READY_SNAPSHOT, user: { enabled: false } });
   render();
