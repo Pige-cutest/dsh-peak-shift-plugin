@@ -86,7 +86,7 @@ dsh plugin --profile web add github:Pige-cutest/dsh-peak-shift-plugin#v0.4.0
 web profile 是默认用法。想让 **headless** 批量任务也错峰,单独建一个 profile:
 
 ```bash
-dsh plugin --profile headless add github:Pige-cutest/dsh-peak-shift-plugin#v0.1.0
+dsh plugin --profile headless add github:Pige-cutest/dsh-peak-shift-plugin#v0.4.0
 ```
 
 安装后重启对应 profile(web / headless),可确认配置树:
