@@ -6,6 +6,25 @@ import { createWindowPolicy } from '../lib/windows.js';
 import { PeakShiftRuntime } from '../lib/runtime.js';
 import { apply } from '../lib/index.js';
 
+// Every state-dir teardown goes through removeStateDir(): a host path can still
+// be flushing a sidecar write (the runtime persists asynchronously, and the
+// resume/disable chains are fire-and-forget) when the test's finally runs, and
+// an rmdir that races that rename lands on ENOTEMPTY.
+//
+// Best-effort by design: teardown never fails a test. Some sandboxes interpose
+// their own delete policy on fs.rmSync, which can leave the directory itself
+// behind after emptying it; that is the sandbox's business, not the plugin's.
+async function removeStateDir(dir) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+}
+
 /** Minimal mock context: captures listeners, intervals, effects. */
 function makeMockCtx() {
   const listeners = new Map();
@@ -206,7 +225,7 @@ s.test('gate parks a peak-time request, pauses the goal, and releases on resume'
     assert(runtime.parkQueue.length === 0, 'park queue drained');
   } finally {
     Date.now = originalNow;
-    rmSync(stateDir, { recursive: true, force: true });
+    await removeStateDir(stateDir);
   }
 });
 
@@ -241,7 +260,7 @@ s.test('defer mode with an aborted signal exits immediately with reject', async 
     assert(decision.kind === 'reject', 'aborted defer gate rejects');
   } finally {
     Date.now = originalNow;
-    rmSync(stateDir, { recursive: true, force: true });
+    await removeStateDir(stateDir);
   }
 });
 
@@ -260,7 +279,7 @@ s.test('poll() iterates runtimes, not cleanup disposers (regression)', async () 
     // Dispose path must also tolerate the entry shape.
     emit(listeners, 'agent/disposed', { agent });
   } finally {
-    rmSync(stateDir, { recursive: true, force: true });
+    await removeStateDir(stateDir);
   }
 });
 
@@ -302,7 +321,7 @@ s.test('settings hot-reload toggle disables the pre-step gate', async () => {
     assert(again.kind === 'reject', 'gate blocks again after re-enable');
   } finally {
     Date.now = originalNow;
-    rmSync(stateDir, { recursive: true, force: true });
+    await removeStateDir(stateDir);
   }
 });
 
@@ -345,7 +364,7 @@ s.test('settings window edits hot-rebuild the live policy (invalid input keeps t
     assert(decision.kind === 'reject', 'invalid weekday list is ignored too');
   } finally {
     Date.now = originalNow;
-    rmSync(stateDir, { recursive: true, force: true });
+    await removeStateDir(stateDir);
   }
 });
 
@@ -397,7 +416,7 @@ s.test('poll() publishes aggregated savings onto the settings base, surviving ag
     assert(base.stats.shiftedRequests === 7, 'disposed agent keeps its contribution');
   } finally {
     Date.now = originalNow;
-    rmSync(stateDir, { recursive: true, force: true });
+    await removeStateDir(stateDir);
   }
 });
 
@@ -427,7 +446,7 @@ s.test('aggregate stats are seeded from sidecar files before any agent exists', 
     assert(settings.baseOf('peak-shift').agents.length === 0, 'no agents yet');
   } finally {
     Date.now = originalNow;
-    rmSync(stateDir, { recursive: true, force: true });
+    await removeStateDir(stateDir);
   }
 });
 
@@ -475,7 +494,281 @@ s.test('agents snapshot lands on the base and the card resume command releases a
     assert(roster[0].paused === false && roster[0].park === 0, 'roster reflects the resumed state');
   } finally {
     Date.now = originalNow;
-    rmSync(stateDir, { recursive: true, force: true });
+    await removeStateDir(stateDir);
+  }
+});
+
+/**
+ * Mock MODERN settings provider (dsh ≥ 0.1.7-rc.2, incl. 0.2.x): a
+ * `SettingsForms`-shaped service keyed by profile entry id, whose form values
+ * the host reads through `describe()` and reacts to via
+ * `settings/document-updated`.
+ */
+function makeModernSettings() {
+  const entries = new Map();
+  const settings = {
+    writable: true,
+    updates: [],
+    configureCalls: [],
+    describe() {
+      return [...entries.values()].map((entry) => ({
+        ns: entry.ns,
+        revision: entry.revision,
+        value: entry.value,
+        applies: 'live',
+      }));
+    },
+    configure(presentation, owner) {
+      settings.configureCalls.push({ presentation, owner });
+      return () => {};
+    },
+    async update(ns, patch, expectedRevision) {
+      const entry = entries.get(ns);
+      if (entry === undefined) throw new Error(`No configurable plugin entry "${ns}"`);
+      if (expectedRevision !== undefined && expectedRevision !== entry.revision) {
+        throw new Error(`settings namespace "${ns}" changed since it was read`);
+      }
+      settings.updates.push({ ns, patch, expectedRevision });
+      entry.value = { ...entry.value, ...patch };
+      entry.revision += 1;
+      return undefined;
+    },
+    /** Register/replace one entry's projected form values. */
+    set(ns, value) {
+      const previous = entries.get(ns);
+      entries.set(ns, { ns, revision: previous === undefined ? 0 : previous.revision + 1, value });
+      return entries.get(ns);
+    },
+    /** The resolved form value of one entry. */
+    valueOf(ns) {
+      return entries.get(ns)?.value;
+    },
+    /** Drive `ctx.inject(['settings'], cb)` with this provider. */
+    mountInto(mockCtx) {
+      mockCtx.get = (name) => (name === 'settings' ? settings : undefined);
+      mockCtx.inject = (deps, callback) => {
+        if (!deps.includes('settings')) return;
+        callback({ settings, effect: (fn) => { fn(); return () => {}; }, get: () => settings });
+      };
+    },
+  };
+  return settings;
+}
+
+/** The projected form value the plugin's Config volatile fields produce. */
+function modernFormValue(overrides = {}) {
+  return {
+    enabled: true,
+    leadMinutes: 5,
+    windows: { zone: 'Asia/Shanghai', peak: [{ days: ['mon', 'tue', 'wed', 'thu', 'fri'], ranges: ['09:00-12:00', '14:00-18:00'] }] },
+    pricing: { model: 'flash', currency: 'CNY' },
+    commands: '',
+    ...overrides,
+  };
+}
+
+s.test('modern settings: the projected Config form drives the switch and the window policy', async () => {
+  const { Config } = await import('../lib/index.js');
+  const validated = Config['~standard'].validate({}).value;
+  const stateDir = mkdtempSync(join(tmpdir(), 'peak-shift-test-'));
+  const originalNow = Date.now;
+  const PEAK = Date.UTC(2026, 7, 24, 3, 0); // 2026-08-24 11:00 CST (Mon peak)
+  const MON_07_15 = Date.UTC(2026, 7, 23, 23, 15); // 2026-08-24 07:15 CST (off-peak)
+  try {
+    const { ctx, listeners } = makeMockCtx();
+    const settings = makeModernSettings();
+    settings.set('peak-shift', modernFormValue());
+    settings.mountInto(ctx);
+    apply(ctx, { ...validated, stateDir, targets: ['interactive'] });
+
+    const agent = makeMockAgent('session-modern');
+    emit(listeners, 'agent/created', { agent });
+    const gate = (agent._listeners.get('agent/pre-step') ?? [])[0];
+    assert(typeof gate === 'function', 'pre-step gate registered on the modern path');
+    const invoke = () => gate(
+      { messages: [{ id: 'm', role: 'user', content: [], source: { kind: 'user' } }], turn: 1, step: 1, signal: new AbortController().signal },
+      async () => ({ kind: 'enter', messages: [] }),
+    );
+
+    // The plugin declares it ships its own page, so no form is auto-generated.
+    assert(settings.configureCalls.length === 1, 'settings presentation configured once');
+    assert(settings.configureCalls[0].presentation.auto === false, 'auto page generation disabled');
+
+    Date.now = () => PEAK;
+    assert((await invoke()).kind === 'reject', 'gate blocks while enabled and peak');
+
+    // A settings-page write lands in the user layer and emits the host event.
+    settings.set('peak-shift', modernFormValue({ enabled: false }));
+    emit(listeners, 'settings/document-updated', 'peak-shift');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert((await invoke()).kind === 'enter', 'gate lets requests through once disabled');
+
+    const other = await invoke();
+    assert(other.kind === 'enter', 'stays open');
+    settings.set('peak-shift', modernFormValue({ enabled: true }));
+    emit(listeners, 'settings/document-updated', 'peak-shift');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert((await invoke()).kind === 'reject', 'gate blocks again after re-enable');
+
+    // Nested window edits (the modern shape) rebuild the live policy.
+    Date.now = () => MON_07_15;
+    assert((await invoke()).kind === 'enter', '07:15 is off-peak under the default windows');
+    settings.set('peak-shift', modernFormValue({ windows: { zone: 'Asia/Shanghai', peak: [{ days: ['mon'], ranges: ['07:00-07:30'] }] } }));
+    emit(listeners, 'settings/document-updated', 'peak-shift');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert((await invoke()).kind === 'reject', 'nested window edit rebuilt the policy');
+
+    // An unrelated namespace must not re-resolve our own form.
+    settings.set('llm-deepseek', { baseURL: 'https://api.deepseek.com' });
+    emit(listeners, 'settings/document-updated', 'llm-deepseek');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert((await invoke()).kind === 'reject', 'other namespaces are ignored');
+  } finally {
+    Date.now = originalNow;
+    await removeStateDir(stateDir);
+  }
+});
+
+s.test('modern settings: a disabled form resumes paused tasks and never strands them', async () => {
+  const { Config } = await import('../lib/index.js');
+  const validated = Config['~standard'].validate({}).value;
+  const stateDir = mkdtempSync(join(tmpdir(), 'peak-shift-test-'));
+  const originalNow = Date.now;
+  const PEAK = Date.UTC(2026, 7, 24, 3, 0); // Mon 11:00 CST
+  try {
+    const { ctx, listeners } = makeMockCtx();
+    const settings = makeModernSettings();
+    settings.set('peak-shift', modernFormValue());
+    settings.mountInto(ctx);
+    apply(ctx, { ...validated, stateDir, targets: ['interactive'] });
+
+    const steered = [];
+    const agent = makeMockAgent('session-modern-disable');
+    agent.steer = (message) => steered.push(message);
+    emit(listeners, 'agent/created', { agent });
+    const gate = (agent._listeners.get('agent/pre-step') ?? [])[0];
+
+    Date.now = () => PEAK;
+    await gate(
+      { messages: [{ id: 'm1', role: 'user', content: [], source: { kind: 'user' } }], turn: 1, step: 1, signal: new AbortController().signal },
+      async () => ({ kind: 'enter', messages: [] }),
+    );
+
+    settings.set('peak-shift', modernFormValue({ enabled: false }));
+    emit(listeners, 'settings/document-updated', 'peak-shift');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert(steered.length === 1 && steered[0].id === 'm1', 'parked message released when the form disables peak-shift');
+  } finally {
+    Date.now = originalNow;
+    await removeStateDir(stateDir);
+  }
+});
+
+s.test('modern settings: the control channel is consumed through the entry form', async () => {
+  const { Config } = await import('../lib/index.js');
+  const validated = Config['~standard'].validate({}).value;
+  const stateDir = mkdtempSync(join(tmpdir(), 'peak-shift-test-'));
+  const originalNow = Date.now;
+  const PEAK = Date.UTC(2026, 7, 24, 3, 0);
+  try {
+    const { ctx, listeners } = makeMockCtx();
+    const settings = makeModernSettings();
+    settings.set('peak-shift', modernFormValue());
+    settings.mountInto(ctx);
+    apply(ctx, { ...validated, stateDir, targets: ['interactive'] });
+
+    const steered = [];
+    const agent = makeMockAgent('session-modern-cmd');
+    agent.steer = (message) => steered.push(message);
+    emit(listeners, 'agent/created', { agent });
+    const gate = (agent._listeners.get('agent/pre-step') ?? [])[0];
+
+    Date.now = () => PEAK;
+    await gate(
+      { messages: [{ id: 'm1', role: 'user', content: [], source: { kind: 'user' } }], turn: 1, step: 1, signal: new AbortController().signal },
+      async () => ({ kind: 'enter', messages: [] }),
+    );
+
+    settings.set('peak-shift', modernFormValue({ commands: 'resume-all' }));
+    emit(listeners, 'settings/document-updated', 'peak-shift');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert(steered.length === 1 && steered[0].id === 'm1', 'resume-all released the parked message');
+    assert(
+      settings.updates.some((update) => update.ns === 'peak-shift' && update.patch.commands === ''),
+      'command field cleared through the entry form',
+    );
+  } finally {
+    Date.now = originalNow;
+    await removeStateDir(stateDir);
+  }
+});
+
+s.test('modern settings: an explicit settingsNamespace pins the entry id', async () => {
+  const { Config } = await import('../lib/index.js');
+  const validated = Config['~standard'].validate({}).value;
+  const stateDir = mkdtempSync(join(tmpdir(), 'peak-shift-test-'));
+  const originalNow = Date.now;
+  const PEAK = Date.UTC(2026, 7, 24, 3, 0);
+  try {
+    const { ctx, listeners } = makeMockCtx();
+    const settings = makeModernSettings();
+    settings.set('renamed-entry', modernFormValue());
+    settings.mountInto(ctx);
+    apply(ctx, { ...validated, stateDir, targets: ['interactive'], settingsNamespace: 'renamed-entry' });
+
+    const agent = makeMockAgent('session-modern-renamed');
+    emit(listeners, 'agent/created', { agent });
+    const gate = (agent._listeners.get('agent/pre-step') ?? [])[0];
+
+    Date.now = () => PEAK;
+    const blocked = await gate(
+      { messages: [{ id: 'm', role: 'user', content: [], source: { kind: 'user' } }], turn: 1, step: 1, signal: new AbortController().signal },
+      async () => ({ kind: 'enter', messages: [] }),
+    );
+    assert(blocked.kind === 'reject', 'the renamed entry drives the gate');
+
+    settings.set('renamed-entry', modernFormValue({ enabled: false }));
+    emit(listeners, 'settings/document-updated', 'renamed-entry');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const open = await gate(
+      { messages: [{ id: 'm', role: 'user', content: [], source: { kind: 'user' } }], turn: 1, step: 1, signal: new AbortController().signal },
+      async () => ({ kind: 'enter', messages: [] }),
+    );
+    assert(open.kind === 'enter', 'the renamed entry hot-reloads the switch');
+  } finally {
+    Date.now = originalNow;
+    await removeStateDir(stateDir);
+  }
+});
+
+s.test('a composition with no settings control plane still gates from the composition config', async () => {
+  const { Config } = await import('../lib/index.js');
+  const validated = Config['~standard'].validate({}).value;
+  const stateDir = mkdtempSync(join(tmpdir(), 'peak-shift-test-'));
+  const originalNow = Date.now;
+  const PEAK = Date.UTC(2026, 7, 24, 3, 0);
+  try {
+    // The dsh 0.1.2–0.1.6 gap: no installSettingsSection, no SettingsForms.
+    const { ctx, listeners, intervals } = makeMockCtx();
+    ctx.get = () => ({ writable: true, update() {}, register() {} });
+    apply(ctx, { ...validated, stateDir, targets: ['interactive'] });
+
+    const agent = makeMockAgent('session-gap');
+    emit(listeners, 'agent/created', { agent });
+    const gate = (agent._listeners.get('agent/pre-step') ?? [])[0];
+
+    Date.now = () => PEAK;
+    const decision = await gate(
+      { messages: [{ id: 'm', role: 'user', content: [], source: { kind: 'user' } }], turn: 1, step: 1, signal: new AbortController().signal },
+      async () => ({ kind: 'enter', messages: [] }),
+    );
+    assert(decision.kind === 'reject', 'gate still enforces the composition windows');
+    intervals[0](); // poll must be a no-op, not a throw, without a legacy base
+  } finally {
+    Date.now = originalNow;
+    await removeStateDir(stateDir);
   }
 });
 

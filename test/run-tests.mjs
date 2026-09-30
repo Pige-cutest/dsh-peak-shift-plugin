@@ -1,9 +1,10 @@
 import { run as runWindows } from './windows.test.mjs';
 import { run as runStats } from './stats.test.mjs';
+import { run as runCompat } from './compat.test.mjs';
 import { run as runSmoke } from './smoke.test.mjs';
 import { run as runClient } from './client.test.mjs';
 
-const runs = [runWindows, runStats, runSmoke, runClient];
+const runs = [runWindows, runStats, runCompat, runSmoke, runClient];
 const results = [];
 for (const run of runs) results.push(await run());
 

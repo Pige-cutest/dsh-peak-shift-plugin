@@ -34,6 +34,19 @@ function makeReactStub() {
     useSyncExternalStore(_subscribe, getSnapshot) {
       return getSnapshot();
     },
+    useMemo(factory) {
+      index += 1; // reserve the slot; the stub recomputes on every render
+      return factory();
+    },
+    useRef(initial) {
+      const slot = index++;
+      if (!(slot in hookStore)) hookStore[slot] = { current: initial };
+      return hookStore[slot];
+    },
+    useId() {
+      index += 1;
+      return 'stub-id';
+    },
     useState(initial) {
       const slot = index++;
       if (!(slot in hookStore)) hookStore[slot] = typeof initial === 'function' ? initial() : initial;
@@ -179,6 +192,108 @@ function makeScope(initialSnapshot) {
   };
 }
 
+/**
+ * Mock browser-plugin context for the MODERN generation (dsh ≥ 0.1.7-rc.2):
+ * a `configForms`-shaped service plus the `settings.plugins.tab` slot.
+ */
+function makeModernBrowserCtx(snapshot, namespace = 'peak-shift') {
+  const registrations = [];
+  const ops = [];
+  const formState = {
+    snapshot,
+    listeners: new Set(),
+    requestedNs: undefined,
+    lastRevision: undefined,
+  };
+  const form = {
+    getSnapshot: () => formState.snapshot,
+    subscribe(listener) {
+      formState.listeners.add(listener);
+      return () => formState.listeners.delete(listener);
+    },
+    set(field, value) { ops.push({ op: 'set', path: [field], value }); return Promise.resolve(true); },
+    unset(field) { ops.push({ op: 'unset', path: [field] }); return Promise.resolve(true); },
+    mutate(next, revision) {
+      for (const op of next) ops.push(op);
+      formState.lastRevision = revision;
+      return Promise.resolve(true);
+    },
+  };
+  const describeFace = {
+    getSnapshot: () => ({
+      status: 'ready',
+      writable: true,
+      hasDocument: true,
+      view: {
+        namespaces: [{
+          ns: namespace,
+          schema: { dict: { enabled: {}, leadMinutes: {}, windows: {}, pricing: {}, commands: {} } },
+          value: snapshot.value,
+        }],
+      },
+    }),
+    subscribe() { return () => {}; },
+    ensure() { return Promise.resolve(); },
+  };
+  const configForms = {
+    describe: () => describeFace,
+    get(id) {
+      formState.requestedNs = id;
+      return form;
+    },
+  };
+  const ctx = {
+    effect(fn) {
+      const dispose = fn();
+      return () => {
+        if (typeof dispose === 'function') dispose();
+      };
+    },
+    locale: {
+      register() { return () => {}; },
+      bind() { return (key) => key; },
+    },
+    slots: {
+      inject(slotName, registrar) {
+        if (slotName !== 'settings.plugins.tab') return;
+        const result = registrar();
+        if (result !== null && typeof result === 'object' && typeof result.next === 'function') {
+          for (const registration of result) registrations.push(registration);
+        } else {
+          registrations.push(result);
+        }
+      },
+      register(options, component) {
+        return { options, component };
+      },
+    },
+    configForms,
+  };
+  return { ctx, registrations, ops, formState };
+}
+
+/** The nested form value the modern Config projection produces. */
+const MODERN_SNAPSHOT = Object.freeze({
+  status: 'ready',
+  writable: true,
+  revision: 7,
+  value: Object.freeze({
+    enabled: true,
+    leadMinutes: 5,
+    windows: Object.freeze({
+      zone: 'Asia/Shanghai',
+      peak: Object.freeze([Object.freeze({
+        days: Object.freeze(['mon', 'tue', 'wed', 'thu', 'fri']),
+        ranges: Object.freeze(['09:00-12:00', '14:00-18:00']),
+      })]),
+    }),
+    pricing: Object.freeze({ model: 'flash', currency: 'CNY' }),
+    commands: '',
+  }),
+  user: Object.freeze({}),
+  base: undefined,
+});
+
 const s = suite('client');
 
 s.test('bundle registers in factory format and exports the browser plugin shape', () => {
@@ -192,8 +307,15 @@ s.test('bundle registers in factory format and exports the browser plugin shape'
   });
   assert(typeof client.apply === 'function', 'exports apply()');
   assert(Array.isArray(client.inject), 'exports inject list');
-  for (const service of ['slots', 'locale', 'connection', 'settingsScope']) {
+  for (const service of ['slots', 'locale']) {
     assert(client.inject.includes(service), `injects ${service}`);
+  }
+  // The settings transport is version-specific (settingsScope on dsh ≤ 0.1.1-rc.2,
+  // configForms on ≥ 0.1.7-rc.2). Naming either one in `inject` would leave the
+  // plugin's fiber pending forever on the other generation, so both are
+  // feature-detected instead.
+  for (const service of ['settingsScope', 'configForms']) {
+    assert(!client.inject.includes(service), `does not gate on ${service}`);
   }
 });
 
@@ -319,6 +441,99 @@ s.test('card renders nothing while the namespace is unavailable; poll re-reads t
 
   await props.poll();
   assert(writes.some((write) => write[0] === 'describe-load'), 'poll refreshes the shared describe mirror');
+});
+
+s.test('modern path registers one tab on settings.plugins.tab keyed by the entry id', () => {
+  const entry = loadBundleEntry();
+  const { react } = makeReactStub();
+  const client = entry.factory((spec) => react);
+  const { ctx, registrations } = makeModernBrowserCtx(MODERN_SNAPSHOT);
+  client.apply(ctx);
+  assert(registrations.length === 1, 'exactly one tab registered');
+  assert(registrations[0].options.name === 'settings.plugins.tab', 'registered on the modern tab slot');
+  assert(registrations[0].options.id === 'peak-shift', 'tab keyed on the settings entry id');
+  assert(registrations[0].options.locale === 'peak-shift', 'dictionary namespace declared');
+  assert(typeof registrations[0].options.label === 'function', 'label is a locale-bound function');
+});
+
+s.test('modern path resolves a renamed entry id from the describe mirror', () => {
+  const entry = loadBundleEntry();
+  const { react } = makeReactStub();
+  const client = entry.factory((spec) => react);
+  const { ctx, registrations, formState } = makeModernBrowserCtx(MODERN_SNAPSHOT, 'renamed-entry');
+  client.apply(ctx);
+  const props = registrations[0].options.inject();
+  registrations[0].component(props); // the wrapper resolves the namespace
+  assert(formState.requestedNs === 'renamed-entry', 'form requested for the served namespace');
+});
+
+s.test('modern card renders, stages window edits, and writes one fenced mutation', async () => {
+  const entry = loadBundleEntry();
+  const reactStub = makeReactStub();
+  const { react } = reactStub;
+  const client = entry.factory((spec) => react);
+  const { ctx, registrations, ops, formState } = makeModernBrowserCtx(MODERN_SNAPSHOT);
+  client.apply(ctx);
+
+  const { options, component } = registrations[0];
+  const props = options.inject();
+  assert(typeof props.t === 'function', 'inject provides the translator');
+  assert(props.configForms !== undefined, 'inject provides the config-forms service');
+
+  // The tab wrapper renders the entry id out of the mirror, then the card.
+  reactStub.beginRender();
+  const wrapper = component(props);
+  assert(typeof wrapper.type === 'function', 'wrapper renders a card component');
+
+  let tree;
+  const render = () => {
+    reactStub.beginRender();
+    tree = wrapper.type(wrapper.props);
+  };
+  render();
+
+  const texts = () => textsOf(tree);
+  assert(tree.type === 'li', 'card root is a list item');
+  elements(tree, 'button').find((button) => textsOf(button).includes('title')).props.onClick();
+  render();
+  assert(texts().includes('windows.title'), 'expanded: window editors visible');
+  assert(texts().includes('runtime.hint'), 'runtime data gap is disclosed, not silently dropped');
+
+  // Nested window edit is staged, then written as one atomic mutation.
+  const morningInput = () => elements(tree, 'input').find((input) => input.props.value === '09:00-12:00');
+  morningInput().props.onChange({ target: { value: '07:00-07:30' } });
+  render();
+  assert(texts().includes('unsaved'), 'dirty chip on the header');
+  elements(tree, 'button').find((button) => textsOf(button).includes('save')).props.onClick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const rangesOp = ops.find((op) => op.op === 'set' && op.path.join('.') === 'windows.peak.0.ranges');
+  assert(rangesOp !== undefined, 'ranges written as a whole array (index-safe path)');
+  assert(rangesOp.value.join(',') === '07:00-07:30,14:00-18:00', 'edited morning range carried');
+  assert(formState.lastRevision === 7, 'write carried the read revision as its fence');
+  assert(!ops.some((op) => op.path.join('.') === 'windows.peak.0.days'), 'unchanged fields not written');
+
+  // The master switch writes immediately through the scalar setter.
+  elements(tree, 'input').find((input) => input.props.type === 'checkbox' && input.props.checked === true).props.onChange({ target: { checked: false } });
+  assert(ops.some((op) => op.op === 'set' && op.path.join('.') === 'enabled' && op.value === false), 'switch writes enabled');
+
+  // Price table is nested, so it goes through a path op.
+  elements(tree, 'select').find((select) => select.props.value === 'flash').props.onChange({ target: { value: 'pro' } });
+  assert(ops.some((op) => op.op === 'set' && op.path.join('.') === 'pricing.model' && op.value === 'pro'), 'select writes the nested price table');
+
+  // Resume-all rides the shared control channel.
+  elements(tree, 'button').find((button) => textsOf(button).includes('agents.resumeAll')).props.onClick();
+  assert(ops.some((op) => op.op === 'set' && op.path.join('.') === 'commands' && op.value === 'resume-all'), 'resume-all writes the control channel');
+});
+
+s.test('modern card renders nothing until the entry form is ready', () => {
+  const entry = loadBundleEntry();
+  const { react } = makeReactStub();
+  const client = entry.factory((spec) => react);
+  const { ctx, registrations } = makeModernBrowserCtx({ ...MODERN_SNAPSHOT, status: 'unavailable' });
+  client.apply(ctx);
+  const { options, component } = registrations[0];
+  const wrapper = component(options.inject());
+  assert(wrapper.type(wrapper.props) === null, 'no trace while unavailable');
 });
 
 export const run = () => s.run();
